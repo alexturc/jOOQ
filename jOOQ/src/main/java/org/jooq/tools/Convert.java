@@ -48,6 +48,7 @@ import static org.jooq.types.Unsigned.ushort;
 
 import java.io.File;
 import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.URI;
@@ -79,15 +80,17 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-// ...
 import org.jooq.Converter;
 import org.jooq.EnumType;
 import org.jooq.Field;
 import org.jooq.Record;
 import org.jooq.SQLDialect;
+import org.jooq.TableRecord;
 import org.jooq.UDTRecord;
 import org.jooq.exception.DataTypeException;
+import org.jooq.impl.UDTRecordImpl;
 import org.jooq.tools.jdbc.MockArray;
+import org.jooq.tools.reflect.Reflect;
 import org.jooq.types.UByte;
 import org.jooq.types.UInteger;
 import org.jooq.types.ULong;
@@ -996,6 +999,8 @@ public final class Convert {
                 else if (Record.class.isAssignableFrom(fromClass)) {
                     Record record = (Record) from;
                     return record.into(toClass);
+                } else if (Record.class.isAssignableFrom(toClass) || toClass.isArray() && UDTRecordImpl.class.isAssignableFrom(getArrayDeepComponentType(toClass))) {
+                    return (U) unmapGeneric(from, toClass);
                 }
 
                 else if (Struct.class.isAssignableFrom(fromClass)) {
@@ -1053,6 +1058,109 @@ public final class Convert {
             }
 
             throw fail(from, toClass);
+        }
+
+        private Object unmapGeneric(Object input, Class<?> outputType) {
+            if (TableRecord.class.isAssignableFrom(outputType)) {
+                return unmapTableRecord(input, (Class<? extends TableRecord>) outputType);
+            }
+            if (UDTRecordImpl.class.isAssignableFrom(outputType)) {
+                return unmapUdtRecord(input, (Class<? extends UDTRecord>) outputType);
+            }
+            if (outputType.isArray() && UDTRecordImpl.class.isAssignableFrom(getArrayDeepComponentType(outputType))) {
+                return unmapMultiDimensionalUdtRecordArray((Object[]) input, outputType);
+            }
+            return input;
+        }
+
+        private Record unmapTableRecord(Object input, Class<? extends TableRecord> outputType) {
+            try {
+                return unmapTableRecordOrFail(input, outputType);
+            } catch (Exception e) {
+                throw new RuntimeException("Unmapping a table record failed.", e);
+            }
+        }
+
+        private Record unmapTableRecordOrFail(Object input, Class<? extends TableRecord> recordType)
+            throws Exception{
+            return unmapTableRecordOrUdtRecordOrFail(input, recordType);
+        }
+
+        private UDTRecord unmapUdtRecord(Object input, Class<? extends UDTRecord> recordType) {
+            try {
+                return unmapUdtRecordOrFail(input, recordType);
+            } catch (Exception e) {
+                throw new RuntimeException("Unmapping a simple UDT failed.", e);
+            }
+        }
+
+        private UDTRecord unmapUdtRecordOrFail(Object input, Class<? extends UDTRecord> recordType)
+            throws Exception {
+            return (UDTRecord) unmapTableRecordOrUdtRecordOrFail(input, recordType);
+        }
+
+        private Record unmapTableRecordOrUdtRecordOrFail(Object input, Class<? extends Record> recordType) throws Exception {
+            Class<?> inputType = input.getClass();
+            Record prototypeRecord = recordType.newInstance();
+            Object[] recordArgs = new Object[prototypeRecord.size()];
+            for (int i = 0; i < prototypeRecord.size(); i++) {
+                Field recordField = prototypeRecord.field(i);
+                java.lang.reflect.Field inputField = Reflect.accessible(inputType.getDeclaredField(recordField.getName()));
+                Object inputFieldValue = inputField.get(input);
+                if (inputFieldValue == null) {
+                    continue;
+                }
+                Object recordFieldValue = unmapGeneric(inputFieldValue, recordField.getType());
+                recordArgs[i] = recordFieldValue;
+            }
+            Constructor<? extends Record> recordCtor = null;
+            for (Constructor<?> iCtor : recordType.getDeclaredConstructors()) {
+                if (iCtor.getParameterCount() != recordArgs.length) {
+                    continue;
+                }
+                if (iCtor.getParameterCount() == 1 && iCtor.getParameterTypes()[0] == inputType) {
+                    continue;
+                }
+                recordCtor = (Constructor<? extends Record>) iCtor;
+                break;
+            }
+            if (recordCtor == null) {
+                throw new RuntimeException("Cannot find a constructor for arguments: " + Arrays.asList(recordArgs));
+            }
+            return recordCtor.newInstance(recordArgs);
+        }
+
+        private Object[] unmapMultiDimensionalUdtRecordArray(Object[] inputArray, Class<?> outputArrayType) {
+            try {
+                return unmapMultiDimensionalUdtRecordArrayOrFail(inputArray, outputArrayType);
+            } catch (Exception e) {
+                throw new RuntimeException("Mapping an udt multi-dimensional array failed.", e);
+            }
+        }
+
+        private Object[] unmapMultiDimensionalUdtRecordArrayOrFail(Object[] inputArrayType, Class<?> outputArrayType)
+            throws Exception {
+            if (inputArrayType == null) {
+                return null;
+            }
+            int length = Array.getLength(inputArrayType);
+            Object[] outputArray = (Object[]) Array.newInstance(outputArrayType.getComponentType(), length);
+            for (int i = 0; i < length; i++) {
+                Object iValue = Array.get(inputArrayType, i);
+                if (iValue == null) {
+                    continue;
+                }
+                outputArray[i] = unmapGeneric(iValue, outputArrayType.getComponentType());
+            }
+            return outputArray;
+        }
+
+        public static Class<?> getArrayDeepComponentType(Class<?> type) {
+            Class<?> iType = type;
+            while (iType.isArray()) {
+                iType = iType.getComponentType();
+            }
+            return iType;
         }
 
         @Override

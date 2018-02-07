@@ -59,11 +59,15 @@ final class UDTDataType<R extends UDTRecord<R>> extends DefaultDataType<R> {
         StringBuilder sb = new StringBuilder();
 
         if (udt.getSchema() != null) {
+            sb.append("\"");
             sb.append(udt.getSchema().getName());
+            sb.append("\"");
             sb.append(".");
         }
 
+        sb.append("\"");
         sb.append(udt.getName());
+        sb.append("\"");
         return sb.toString();
     }
 }
